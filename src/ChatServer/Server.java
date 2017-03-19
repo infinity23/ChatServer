@@ -1,17 +1,20 @@
 package ChatServer;
 
-import java.io.BufferedReader;
 import java.io.BufferedWriter;
-import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
-import java.net.Socket;
 import java.net.UnknownHostException;
+import java.nio.ByteBuffer;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
+import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -26,6 +29,8 @@ public class Server {
 
 	private ArrayList<Message> list;
 	private HashMap<String, String> map;
+
+	private Selector selector = null;
 
 	public static void main(String[] args) {
 		String ip = args[0];
@@ -53,40 +58,79 @@ public class Server {
 			list = new ArrayList<>();
 			map = new HashMap<>();
 
-			ServerSocket serverSocket = new ServerSocket();
-			serverSocket.bind(address);
-			System.out.println("Server is running.");
-			while (true) {
-				Socket client = serverSocket.accept();
-				System.out.println("build connection");
-				new HandlerThread(client);
+			// ServerSocket serverSocket = new ServerSocket();
+			// serverSocket.bind(address);
+			// System.out.println("Server is running.");
+			// while (true) {
+			// Socket client = serverSocket.accept();
+			// System.out.println("build connection");
+			// new HandlerThread(client);
+			// }
+
+			ServerSocketChannel server = ServerSocketChannel.open();
+			server.bind(address);
+
+			selector = Selector.open();
+
+			server.configureBlocking(false);
+			server.register(selector, SelectionKey.OP_ACCEPT);
+
+			while (selector.select() > 0) {
+				Iterator<SelectionKey> it = selector.selectedKeys().iterator();
+				while (it.hasNext()) {
+					SelectionKey key = it.next();
+					it.remove();
+					if (key.isAcceptable()) {
+						ServerSocketChannel serverSocketChannel = (ServerSocketChannel) key.channel();
+						SocketChannel channel = serverSocketChannel.accept();
+						channel.configureBlocking(false);
+						channel.register(this.selector, SelectionKey.OP_READ);
+
+					} else if (key.isReadable()) {
+						key.interestOps(key.interestOps() & (~SelectionKey.OP_READ));
+						exec.execute(new ThreadHandler(key));
+
+					}
+
+				}
 			}
+
 		} catch (Exception e) {
 			e.printStackTrace();
 		}
 	}
 
-	private class HandlerThread implements Runnable {
-		private Socket socket;
+	private class ThreadHandler implements Runnable {
+		Charset charset = Charset.forName("UTF-8");
+		SocketChannel socket = null;
 
-		public HandlerThread(Socket client) {
-			socket = client;
-			exec.execute(this);
+		public ThreadHandler(SelectionKey key) {
+			socket = (SocketChannel) key.channel();
 		}
 
+		@Override
 		public void run() {
 			try {
-				BufferedReader input = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-				BufferedWriter output = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
-
+				BufferedWriter output = new BufferedWriter(new OutputStreamWriter(socket.socket().getOutputStream()));
 				output.write(protocol.createMessage("welcome", "Welcome to my server.") + "\n");
 				output.flush();
 
-				Boolean signin = false;
-				String username = "";
-
 				while (true) {
-					String request = input.readLine();
+
+					ByteBuffer bf = ByteBuffer.allocate(1024);
+					StringBuilder sb = new StringBuilder();
+					while (socket.read(bf) != -1) {
+						bf.flip();
+						String string = charset.decode(bf).toString();
+						sb.append(string);
+						bf.clear();
+					}
+
+					String request = sb.toString();
+
+					Boolean signin = false;
+					String username = "";
+
 					String[] info = protocol.decodeMessage(request);
 
 					if (info[0].equals("sign-up")) {
@@ -110,16 +154,16 @@ public class Server {
 
 							output.write(protocol.createMessage(info[0], flag.toString(), reason) + "\n");
 							output.close();
-							input.close();
 							close(socket);
 							return;
 						} catch (Exception e) {
 							output.write(
 									protocol.createMessage(info[0], "false", "Usage: type, username, password") + "\n");
-							output.close();
-							input.close();
-							close(socket);
+
 							return;
+						} finally {
+							output.close();
+							close(socket);
 						}
 					}
 
@@ -141,17 +185,16 @@ public class Server {
 
 							if (!signin) {
 								output.close();
-								input.close();
 								close(socket);
 								return;
 							}
 						} catch (Exception e) {
 							output.write(
 									protocol.createMessage(info[0], "false", "Usage: type, username, password") + "\n");
-							output.close();
-							input.close();
-							close(socket);
 							return;
+						} finally {
+							output.close();
+							close(socket);
 						}
 
 					}
@@ -204,22 +247,13 @@ public class Server {
 					}
 
 				}
-
 			} catch (Exception e) {
-				System.out.println("connection lost");
-			} finally {
-				if (socket != null) {
-					try {
-						socket.close();
-					} catch (Exception e) {
-						socket = null;
-						e.printStackTrace();
-					}
-				}
+				e.printStackTrace();
 			}
+
 		}
 
-		private void close(Socket socket) {
+		private void close(SocketChannel socket) {
 			if (socket != null) {
 				try {
 					socket.close();
@@ -229,5 +263,6 @@ public class Server {
 				}
 			}
 		}
+
 	}
 }
